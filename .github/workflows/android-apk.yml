@@ -34,12 +34,18 @@ jobs:
           packages: "platform-tools"
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null || true
+        run: |
+          yes | sdkmanager --licenses --channel=3 > /dev/null || true
 
-      - name: Install Android SDK, NDK and CMake
+      - name: Install Android 17 SDK
+        run: |
+          sdkmanager --channel=3 \
+            "platforms;android-37" \
+            "build-tools;37.0.0"
+
+      - name: Install NDK and CMake
         run: |
           sdkmanager \
-            "platforms;android-37" \
             "ndk;28.2.13676358" \
             "cmake;3.31.6"
 
@@ -48,15 +54,25 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      # El build.gradle actual todavía pide CMake 3.22.1,
-      # pero el propio CI del proyecto ya fue adaptado a 3.31.6
-      # para evitar problemas con shaderc / SPIRV-Tools.
+      - name: Show installed Android packages
+        run: |
+          echo "=== Android platforms ==="
+          ls -la "$ANDROID_SDK_ROOT/platforms/" || true
+
+          echo "=== Build tools ==="
+          ls -la "$ANDROID_SDK_ROOT/build-tools/" || true
+
+          echo "=== NDK ==="
+          ls -la "$ANDROID_SDK_ROOT/ndk/" || true
+
+          echo "=== CMake ==="
+          ls -la "$ANDROID_SDK_ROOT/cmake/" || true
+
       - name: Use CMake 3.31.6 for CI
         run: |
           sed -i 's/version = "3\.22\.1"/version = "3.31.6"/g' \
             platforms/android/app/build.gradle.kts
 
-          echo "Configured CMake version:"
           grep -n 'version = "3.31.6"' \
             platforms/android/app/build.gradle.kts || true
 
@@ -71,20 +87,19 @@ jobs:
 
       - name: Make Gradle executable
         working-directory: platforms/android
-        run: chmod +x ./gradlew
+        run: |
+          chmod +x ./gradlew
 
       - name: Show build environment
         working-directory: platforms/android
         run: |
           java -version
           ./gradlew --version
-          sdkmanager --version
+
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          ls "$ANDROID_SDK_ROOT/cmake/"
-          ls "$ANDROID_SDK_ROOT/ndk/"
 
-      - name: Build GitHub Release APK
+      - name: Build Github Release APK
         working-directory: platforms/android
         run: |
           ./gradlew \
@@ -95,6 +110,7 @@ jobs:
       - name: Find generated APK
         run: |
           echo "Generated APK files:"
+
           find platforms/android/app/build/outputs/apk \
             -type f \
             -name "*.apk" \
@@ -104,13 +120,12 @@ jobs:
         run: |
           APK=$(find platforms/android/app/build/outputs/apk \
             -type f \
-            -path "*github*release*" \
             -name "*.apk" \
             -print \
             -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: Github Release APK not found."
+            echo "ERROR: APK not found."
             exit 1
           fi
 
