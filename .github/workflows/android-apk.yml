@@ -1,0 +1,130 @@
+name: Build DGARMSX2 Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Build Android ARM64 APK
+    runs-on: ubuntu-24.04
+
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            platforms/android/*.gradle*
+            platforms/android/**/*.gradle*
+            platforms/android/gradle/libs.versions.toml
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          sdkmanager \
+            "platforms;android-37" \
+            "ndk;28.2.13676358" \
+            "cmake;3.31.6"
+
+      - name: Configure NDK environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      # El build.gradle actual todavía pide CMake 3.22.1,
+      # pero el propio CI del proyecto ya fue adaptado a 3.31.6
+      # para evitar problemas con shaderc / SPIRV-Tools.
+      - name: Use CMake 3.31.6 for CI
+        run: |
+          sed -i 's/version = "3\.22\.1"/version = "3.31.6"/g' \
+            platforms/android/app/build.gradle.kts
+
+          echo "Configured CMake version:"
+          grep -n 'version = "3.31.6"' \
+            platforms/android/app/build.gradle.kts || true
+
+      - name: Fetch shaderc dependencies
+        working-directory: platforms/android
+        run: |
+          python3 app/src/main/cpp/3rdparty/shaderc/utils/git-sync-deps
+
+      - name: Install Rust Android target
+        run: |
+          rustup target add aarch64-linux-android
+
+      - name: Make Gradle executable
+        working-directory: platforms/android
+        run: chmod +x ./gradlew
+
+      - name: Show build environment
+        working-directory: platforms/android
+        run: |
+          java -version
+          ./gradlew --version
+          sdkmanager --version
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls "$ANDROID_SDK_ROOT/cmake/"
+          ls "$ANDROID_SDK_ROOT/ndk/"
+
+      - name: Build GitHub Release APK
+        working-directory: platforms/android
+        run: |
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            :app:assembleGithubRelease
+
+      - name: Find generated APK
+        run: |
+          echo "Generated APK files:"
+          find platforms/android/app/build/outputs/apk \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      - name: Package APK
+        run: |
+          APK=$(find platforms/android/app/build/outputs/apk \
+            -type f \
+            -path "*github*release*" \
+            -name "*.apk" \
+            -print \
+            -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: Github Release APK not found."
+            exit 1
+          fi
+
+          mkdir -p output
+
+          cp "$APK" output/DGARMSX2-Android-arm64.apk
+
+          echo "Final APK:"
+          ls -lh output/DGARMSX2-Android-arm64.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DGARMSX2-Android-arm64
+          path: output/DGARMSX2-Android-arm64.apk
+          if-no-files-found: error
+          compression-level: 0
