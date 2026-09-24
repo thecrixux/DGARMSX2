@@ -25,7 +25,7 @@ jobs:
 
       - name: Source information
         run: |
-          echo "DGARMSX2 source:"
+          echo "=== DGARMSX2 source ==="
           git log -1 --oneline
 
           SHORT_SHA=$(git rev-parse --short=8 HEAD)
@@ -56,10 +56,18 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null || true
 
-      - name: Install Android SDK, NDK 29 and CMake
+      - name: Show available Android 17 packages
         run: |
+          sdkmanager --list --channel=3 \
+            | grep -E "platforms;android-37|build-tools;37" \
+            || true
+
+      - name: Install Android 17 API 37.0, NDK 29 and CMake
+        run: |
+          sdkmanager --channel=3 \
+            "platforms;android-37.0"
+
           sdkmanager \
-            "platforms;android-36" \
             "build-tools;${BUILD_TOOLS_VERSION}" \
             "ndk;${ANDROID_NDK_VERSION}" \
             "cmake;${CMAKE_VERSION}"
@@ -69,21 +77,33 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
-      - name: Patch API 37 preview to stable API 36
+      - name: Configure API 37.0
         run: |
-          sed -i 's/compileSdk = 37/compileSdk = 36/g' \
-            platforms/android/app/build.gradle.kts
+          FILE="platforms/android/app/build.gradle.kts"
 
-          sed -i 's/targetSdk = 37/targetSdk = 36/g' \
-            platforms/android/app/build.gradle.kts
+          # dgp-v8 already uses compileSdk = 37.
+          # Android 17 is currently published as API 37.0,
+          # so explicitly tell AGP to use minor API level 0.
+          if ! grep -q "compileSdkMinor" "$FILE"; then
+            sed -i \
+              '/compileSdk = 37/a\    compileSdkMinor = 0' \
+              "$FILE"
+          fi
 
-          sed -i 's/version = "3\.22\.1"/version = "3.31.6"/g' \
-            platforms/android/app/build.gradle.kts
+          # shaderc/spirv-tools need newer CMake than the old 3.22 pin.
+          sed -i \
+            's/version = "3\.22\.1"/version = "3.31.6"/g' \
+            "$FILE"
 
           echo "=== Android configuration ==="
-          grep -n "compileSdk" platforms/android/app/build.gradle.kts
-          grep -n "targetSdk" platforms/android/app/build.gradle.kts
-          grep -n '3.31.6' platforms/android/app/build.gradle.kts || true
+          grep -n -E \
+            "compileSdk|compileSdkMinor|targetSdk|ndkVersion|3.31.6" \
+            "$FILE"
+
+          echo
+          echo "=== Installed API 37 platform ==="
+          ls -la "$ANDROID_SDK_ROOT/platforms/"
+          ls -la "$ANDROID_SDK_ROOT/platforms/android-37.0/" | head
 
       - name: Fetch shaderc dependencies
         working-directory: platforms/android
@@ -99,7 +119,7 @@ jobs:
             exit 1
           fi
 
-          echo "PGO profile:"
+          echo "=== PGO profile ==="
           ls -lh "$PROF"
 
           echo "PGO_PROFILE=$PROF" >> "$GITHUB_ENV"
@@ -107,6 +127,24 @@ jobs:
       - name: Make Gradle executable
         working-directory: platforms/android
         run: chmod +x ./gradlew
+
+      - name: Show build environment
+        working-directory: platforms/android
+        run: |
+          java -version
+          ./gradlew --version
+
+          echo
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+          echo
+          echo "=== SDK platforms ==="
+          ls -la "$ANDROID_SDK_ROOT/platforms/"
+
+          echo
+          echo "=== NDK ==="
+          ls -la "$ANDROID_SDK_ROOT/ndk/"
 
       - name: Build 4K Release PGO core
         working-directory: platforms/android
@@ -170,7 +208,7 @@ jobs:
           unzip -l work/base-16k.apk \
             | grep "lib/arm64-v8a/libemucore_16k.so"
 
-      - name: Extract both native cores
+      - name: Extract both optimized cores
         run: |
           mkdir -p work/lib-stage/lib/arm64-v8a
 
@@ -209,7 +247,7 @@ jobs:
               lib
           )
 
-      - name: Zipalign APK
+      - name: Zipalign universal APK
         run: |
           "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/zipalign" \
             -f \
@@ -218,7 +256,7 @@ jobs:
             work/universal-unsigned.apk \
             work/universal-aligned.apk
 
-      - name: Create signing key
+      - name: Create test signing key
         run: |
           keytool \
             -genkeypair \
@@ -241,7 +279,7 @@ jobs:
             --ks-key-alias dgarmsx2 \
             --ks-pass pass:android \
             --key-pass pass:android \
-            --out output/DGARMSX2-dgp-v8-MAX-${SHORT_SHA}.apk \
+            --out "output/DGARMSX2-dgp-v8-MAX-${SHORT_SHA}.apk" \
             work/universal-aligned.apk
 
       - name: Verify final APK
@@ -268,6 +306,7 @@ jobs:
           echo "=== Final APK ==="
           ls -lh "$APK"
 
+          echo
           sha256sum "$APK"
 
       - name: Upload DGARMSX2 MAX APK
