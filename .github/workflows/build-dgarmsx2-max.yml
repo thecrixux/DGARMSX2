@@ -1,0 +1,279 @@
+name: Build DGARMSX2 dgp-v8 MAX
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: DGARMSX2 Android ARM64 Release PGO
+    runs-on: ubuntu-24.04
+
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx8g -Dfile.encoding=UTF-8"
+      ANDROID_NDK_VERSION: "29.0.14206865"
+      CMAKE_VERSION: "3.31.6"
+      BUILD_TOOLS_VERSION: "36.0.0"
+
+    steps:
+      - name: Checkout DGARMSX2 dgp-v8
+        uses: actions/checkout@v5
+        with:
+          repository: skyksit/DGARMSX2
+          ref: dgp-v8
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Source information
+        run: |
+          echo "DGARMSX2 source:"
+          git log -1 --oneline
+
+          SHORT_SHA=$(git rev-parse --short=8 HEAD)
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+
+          VC=$((900000 + GITHUB_RUN_NUMBER))
+          echo "VC=$VC" >> "$GITHUB_ENV"
+
+          echo "VN=dgp-v8-max-$SHORT_SHA" >> "$GITHUB_ENV"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            platforms/android/*.gradle*
+            platforms/android/**/*.gradle*
+            platforms/android/gradle/libs.versions.toml
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
+
+      - name: Accept Android SDK licenses
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Install Android SDK, NDK 29 and CMake
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}"
+
+      - name: Configure Android environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Patch API 37 preview to stable API 36
+        run: |
+          sed -i 's/compileSdk = 37/compileSdk = 36/g' \
+            platforms/android/app/build.gradle.kts
+
+          sed -i 's/targetSdk = 37/targetSdk = 36/g' \
+            platforms/android/app/build.gradle.kts
+
+          sed -i 's/version = "3\.22\.1"/version = "3.31.6"/g' \
+            platforms/android/app/build.gradle.kts
+
+          echo "=== Android configuration ==="
+          grep -n "compileSdk" platforms/android/app/build.gradle.kts
+          grep -n "targetSdk" platforms/android/app/build.gradle.kts
+          grep -n '3.31.6' platforms/android/app/build.gradle.kts || true
+
+      - name: Fetch shaderc dependencies
+        working-directory: platforms/android
+        run: |
+          python3 app/src/main/cpp/3rdparty/shaderc/utils/git-sync-deps
+
+      - name: Verify PGO profile
+        run: |
+          PROF="$GITHUB_WORKSPACE/platforms/android/pgo/armsx2.profdata"
+
+          if [ ! -f "$PROF" ]; then
+            echo "ERROR: PGO profile not found."
+            exit 1
+          fi
+
+          echo "PGO profile:"
+          ls -lh "$PROF"
+
+          echo "PGO_PROFILE=$PROF" >> "$GITHUB_ENV"
+
+      - name: Make Gradle executable
+        working-directory: platforms/android
+        run: chmod +x ./gradlew
+
+      - name: Build 4K Release PGO core
+        working-directory: platforms/android
+        run: |
+          ./gradlew :app:cleanCxx
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            :app:assembleGithubRelease \
+            -Parmsx2.applicationId=com.dgarmsx2.max \
+            -Parmsx2.minSdk=35 \
+            -Parmsx2.ndkVersion=${ANDROID_NDK_VERSION} \
+            -Parmsx2.march=armv8.2-a+fp16+dotprod \
+            -Parmsx2.hostPageSize=0x1000 \
+            -Parmsx2.nativeLibName=emucore_4k \
+            -Parmsx2.pgo=optimize \
+            -Parmsx2.pgoProfile="${PGO_PROFILE}" \
+            -Parmsx2.librashader=false \
+            -Parmsx2.versionCode=${VC} \
+            -Parmsx2.versionName=${VN}
+
+          mkdir -p "$GITHUB_WORKSPACE/work"
+
+          cp \
+            app/build/outputs/apk/github/release/app-github-release.apk \
+            "$GITHUB_WORKSPACE/work/base-4k.apk"
+
+      - name: Verify 4K core
+        run: |
+          unzip -l work/base-4k.apk \
+            | grep "lib/arm64-v8a/libemucore_4k.so"
+
+      - name: Build 16K Release PGO core
+        working-directory: platforms/android
+        run: |
+          ./gradlew :app:cleanCxx
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            :app:assembleGithubRelease \
+            -Parmsx2.applicationId=com.dgarmsx2.max \
+            -Parmsx2.minSdk=35 \
+            -Parmsx2.ndkVersion=${ANDROID_NDK_VERSION} \
+            -Parmsx2.march=armv8.2-a+fp16+dotprod \
+            -Parmsx2.hostPageSize=0x4000 \
+            -Parmsx2.nativeLibName=emucore_16k \
+            -Parmsx2.pgo=optimize \
+            -Parmsx2.pgoProfile="${PGO_PROFILE}" \
+            -Parmsx2.librashader=false \
+            -Parmsx2.versionCode=${VC} \
+            -Parmsx2.versionName=${VN}
+
+          cp \
+            app/build/outputs/apk/github/release/app-github-release.apk \
+            "$GITHUB_WORKSPACE/work/base-16k.apk"
+
+      - name: Verify 16K core
+        run: |
+          unzip -l work/base-16k.apk \
+            | grep "lib/arm64-v8a/libemucore_16k.so"
+
+      - name: Extract both native cores
+        run: |
+          mkdir -p work/lib-stage/lib/arm64-v8a
+
+          unzip -p \
+            work/base-4k.apk \
+            lib/arm64-v8a/libemucore_4k.so \
+            > work/lib-stage/lib/arm64-v8a/libemucore_4k.so
+
+          unzip -p \
+            work/base-16k.apk \
+            lib/arm64-v8a/libemucore_16k.so \
+            > work/lib-stage/lib/arm64-v8a/libemucore_16k.so
+
+          echo "=== Native cores ==="
+          ls -lh work/lib-stage/lib/arm64-v8a/
+
+      - name: Create universal 4K + 16K APK
+        run: |
+          cp work/base-4k.apk work/universal-unsigned.apk
+
+          zip -qd \
+            work/universal-unsigned.apk \
+            "META-INF/*" \
+            >/dev/null 2>&1 || true
+
+          zip -qd \
+            work/universal-unsigned.apk \
+            "lib/arm64-v8a/libemucore_4k.so" \
+            "lib/arm64-v8a/libemucore_16k.so" \
+            >/dev/null 2>&1 || true
+
+          (
+            cd work/lib-stage
+            zip -qr -0 \
+              "$GITHUB_WORKSPACE/work/universal-unsigned.apk" \
+              lib
+          )
+
+      - name: Zipalign APK
+        run: |
+          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/zipalign" \
+            -f \
+            -P 16 \
+            4 \
+            work/universal-unsigned.apk \
+            work/universal-aligned.apk
+
+      - name: Create signing key
+        run: |
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore work/dgarmsx2-test.jks \
+            -storepass android \
+            -keypass android \
+            -alias dgarmsx2 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=DGARMSX2 Community Build,O=Community,C=ES"
+
+      - name: Sign final Release APK
+        run: |
+          mkdir -p output
+
+          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/apksigner" sign \
+            --ks work/dgarmsx2-test.jks \
+            --ks-key-alias dgarmsx2 \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out output/DGARMSX2-dgp-v8-MAX-${SHORT_SHA}.apk \
+            work/universal-aligned.apk
+
+      - name: Verify final APK
+        run: |
+          APK="output/DGARMSX2-dgp-v8-MAX-${SHORT_SHA}.apk"
+
+          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/apksigner" \
+            verify \
+            --verbose \
+            "$APK"
+
+          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/zipalign" \
+            -c \
+            -P 16 \
+            4 \
+            "$APK"
+
+          echo
+          echo "=== Both optimized cores ==="
+          unzip -l "$APK" \
+            | grep -E "libemucore_(4k|16k)\.so"
+
+          echo
+          echo "=== Final APK ==="
+          ls -lh "$APK"
+
+          sha256sum "$APK"
+
+      - name: Upload DGARMSX2 MAX APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DGARMSX2-dgp-v8-MAX-${{ env.SHORT_SHA }}
+          path: output/DGARMSX2-dgp-v8-MAX-${{ env.SHORT_SHA }}.apk
+          if-no-files-found: error
+          compression-level: 0
